@@ -77,7 +77,7 @@ async def is_subscribed(update: Update):
     user_id = update.effective_user.id
     expiry = db.get_user_expiry(user_id)
     if not expiry or expiry < datetime.now():
-        await update.message.reply_text("❌ **服务已到期**\n请使用 /renew 续费 (150 USDT/30天)")
+        await update.message.reply_text("\n请使用 /renew 续费后使用 (150 USDT/30天)")
         return False
     return True
 
