@@ -1,0 +1,6 @@
+python-telegram-bot
+psycopg2-binary
+pandas
+Pillow
+python-dotenv
+requests
