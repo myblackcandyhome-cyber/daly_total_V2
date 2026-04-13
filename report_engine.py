@@ -14,9 +14,10 @@ class ReportEngine:
         if not records:
             return None
             
+        # สร้าง DataFrame (รองรับข้อมูลที่ดึงมาจาก psycopg2 RealDictCursor)
         df = pd.DataFrame(records)
         
-        # ตั้งค่าขนาด
+        # ตั้งค่าขนาดกว้างและสูง
         width, row_h, head_h, header_row_h = 1350, 50, 100, 50
         img_h = head_h + header_row_h + (len(df) + 1) * row_h
         
@@ -25,17 +26,18 @@ class ReportEngine:
         
         # 2. โหลดฟอนต์พร้อมระบบสำรอง
         try:
-            font = ImageFont.truetype(self.font_path, 20)
+            # ปรับขนาดฟอนต์ให้พอดีกับตาราง
+            font = ImageFont.truetype(self.font_path, 18)
             title_font = ImageFont.truetype(self.font_path, 35)
-            bold_font = ImageFont.truetype(self.font_path, 22)
+            bold_font = ImageFont.truetype(self.font_path, 20)
         except:
             print("⚠️ Font not found, using default.")
             font = title_font = bold_font = ImageFont.load_default()
 
         # --- ส่วนหัว (Title) ---
         draw.rectangle([0, 0, width, head_h], fill=(255, 255, 0))
-        # คำนวณให้ Title อยู่กึ่งกลางเสมอ
         title_text = "每日报表"
+        # ใช้ textlength แทนการดึงค่าแบบเก่าเพื่อความแม่นยำ
         t_w = draw.textlength(title_text, font=title_font)
         draw.text(((width - t_w) // 2, 25), title_text, fill=(255, 0, 0), font=title_font)
 
@@ -53,19 +55,24 @@ class ReportEngine:
         y = head_h + header_row_h
         for _, r in df.iterrows():
             curr_x = 0
-            # จัดฟอร์แมตตัวเลขให้สวยงาม
-            jpy = f"{float(r.get('jpy_amt', 0)):,.0f} 日元"
-            perf = f"{float(r.get('u_perf', 0)):,.2f} (U)"
-            fee = f"{float(r.get('fee_u', 0)):,.2f} (%)"
-            act = f"{float(r.get('actual_u', 0)):,.2f} (U)"
+            
+            # จัดฟอร์แมตตัวเลขให้สวยงามและรองรับค่าที่เป็น None
+            def safe_float(val):
+                try: return float(val) if val is not None else 0.0
+                except: return 0.0
+
+            jpy = f"{safe_float(r.get('jpy_amt')):,.0f} 日元"
+            perf = f"{safe_float(r.get('u_perf')):,.2f} (U)"
+            fee = f"{safe_float(r.get('fee_u')):,.2f} (%)"
+            act = f"{safe_float(r.get('actual_u')):,.2f} (U)"
             
             vals = [
                 str(r.get('record_date', '-')), 
-                str(int(r.get('t12_val', 0))), 
-                str(int(r.get('t23_val', 0))), 
-                str(int(r.get('p_day', 0))), 
-                str(int(r.get('p_total', 0))), 
-                str(int(r.get('cust_count', 0))),
+                str(int(safe_float(r.get('t12_val')))), 
+                str(int(safe_float(r.get('t23_val')))), 
+                str(int(safe_float(r.get('p_day')))), 
+                str(int(safe_float(r.get('p_total')))), 
+                str(int(safe_float(r.get('cust_count')))),
                 jpy, perf, fee, act
             ]
             
@@ -77,20 +84,20 @@ class ReportEngine:
 
         # --- แถวผลรวม (Summary Row) ---
         curr_x = 0
-        # ป้องกัน error กรณีไม่มีข้อมูลแถวสุดท้าย
-        last_p = str(int(df['p_total'].iloc[-1])) if not df.empty else "0"
+        # ผลรวมของ "总压单" มักจะใช้ค่าล่าสุด ไม่ใช่การบวกสะสม
+        last_p = str(int(safe_float(df['p_total'].iloc[-1]))) if not df.empty else "0"
         
         totals = [
             "总计", 
-            f"{df['t12_val'].sum():.0f}", 
-            f"{df['t23_val'].sum():.0f}", 
-            f"{df['p_day'].sum():.0f}", 
+            f"{df['t12_val'].apply(safe_float).sum():.0f}", 
+            f"{df['t23_val'].apply(safe_float).sum():.0f}", 
+            f"{df['p_day'].apply(safe_float).sum():.0f}", 
             last_p, 
-            f"{df['cust_count'].sum():.0f}", 
-            f"{df['jpy_amt'].sum():,.0f} 日元", 
-            f"{df['u_perf'].sum():,.2f} (U)", 
+            f"{df['cust_count'].apply(safe_float).sum():.0f}", 
+            f"{df['jpy_amt'].apply(safe_float).sum():,.0f} 日元", 
+            f"{df['u_perf'].apply(safe_float).sum():,.2f} (U)", 
             "-", 
-            f"{df['actual_u'].sum():,.2f} (U)"
+            f"{df['actual_u'].apply(safe_float).sum():,.2f} (U)"
         ]
         
         for i, v in enumerate(totals):
@@ -98,7 +105,10 @@ class ReportEngine:
             draw.text((curr_x + 10, y + 10), v, fill="red", font=bold_font)
             curr_x += cols_w[i]
 
-        path = os.path.join(self.output_path, "final_report.png")
+        # สร้างชื่อไฟล์ที่ไม่ซ้ำกัน (ใช้ Timestamp เพื่อป้องกันไฟล์ทับกันถ้า Gen พร้อมกันหลายกลุ่ม)
+        filename = f"report_{int(time.time())}.png"
+        path = os.path.join(self.output_path, filename)
+        
         img.save(path)
-        img.close() # ปิดไฟล์เพื่อคืนคืน Memory
+        img.close() 
         return path
