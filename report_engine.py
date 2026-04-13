@@ -1,11 +1,13 @@
 import os
 import pandas as pd
 from PIL import Image, ImageDraw, ImageFont
+import time  # ✅ เพิ่มบรรทัดนี้เพื่อแก้ไข Error: name 'time' is not defined
 
 class ReportEngine:
     def __init__(self, output_path="reports", font_path="fonts/msyh.ttc"):
         self.output_path = output_path
         self.font_path = font_path
+        # สร้างโฟลเดอร์สำหรับเก็บรูปภาพหากยังไม่มี
         if not os.path.exists(self.output_path): 
             os.makedirs(self.output_path)
 
@@ -14,10 +16,10 @@ class ReportEngine:
         if not records:
             return None
             
-        # สร้าง DataFrame (รองรับข้อมูลที่ดึงมาจาก psycopg2 RealDictCursor)
+        # สร้าง DataFrame
         df = pd.DataFrame(records)
         
-        # ตั้งค่าขนาดกว้างและสูง
+        # ตั้งค่าขนาดกว้างและสูงของภาพ
         width, row_h, head_h, header_row_h = 1350, 50, 100, 50
         img_h = head_h + header_row_h + (len(df) + 1) * row_h
         
@@ -26,7 +28,6 @@ class ReportEngine:
         
         # 2. โหลดฟอนต์พร้อมระบบสำรอง
         try:
-            # ปรับขนาดฟอนต์ให้พอดีกับตาราง
             font = ImageFont.truetype(self.font_path, 18)
             title_font = ImageFont.truetype(self.font_path, 35)
             bold_font = ImageFont.truetype(self.font_path, 20)
@@ -37,7 +38,6 @@ class ReportEngine:
         # --- ส่วนหัว (Title) ---
         draw.rectangle([0, 0, width, head_h], fill=(255, 255, 0))
         title_text = "每日报表"
-        # ใช้ textlength แทนการดึงค่าแบบเก่าเพื่อความแม่นยำ
         t_w = draw.textlength(title_text, font=title_font)
         draw.text(((width - t_w) // 2, 25), title_text, fill=(255, 0, 0), font=title_font)
 
@@ -51,16 +51,16 @@ class ReportEngine:
             draw.text((curr_x + 10, head_h + 12), h, fill="black", font=bold_font)
             curr_x += cols_w[i]
 
+        # --- ฟังก์ชันช่วยจัดการตัวเลข (Helper) ---
+        def safe_float(val):
+            try: return float(val) if val is not None else 0.0
+            except: return 0.0
+
         # --- ข้อมูลในตาราง (Rows) ---
         y = head_h + header_row_h
         for _, r in df.iterrows():
             curr_x = 0
             
-            # จัดฟอร์แมตตัวเลขให้สวยงามและรองรับค่าที่เป็น None
-            def safe_float(val):
-                try: return float(val) if val is not None else 0.0
-                except: return 0.0
-
             jpy = f"{safe_float(r.get('jpy_amt')):,.0f} 日元"
             perf = f"{safe_float(r.get('u_perf')):,.2f} (U)"
             fee = f"{safe_float(r.get('fee_u')):,.2f} (%)"
@@ -84,7 +84,6 @@ class ReportEngine:
 
         # --- แถวผลรวม (Summary Row) ---
         curr_x = 0
-        # ผลรวมของ "总压单" มักจะใช้ค่าล่าสุด ไม่ใช่การบวกสะสม
         last_p = str(int(safe_float(df['p_total'].iloc[-1]))) if not df.empty else "0"
         
         totals = [
@@ -105,10 +104,11 @@ class ReportEngine:
             draw.text((curr_x + 10, y + 10), v, fill="red", font=bold_font)
             curr_x += cols_w[i]
 
-        # สร้างชื่อไฟล์ที่ไม่ซ้ำกัน (ใช้ Timestamp เพื่อป้องกันไฟล์ทับกันถ้า Gen พร้อมกันหลายกลุ่ม)
+        # --- บันทึกไฟล์ ---
+        # ใช้ timestamp เพื่อป้องกันชื่อไฟล์ซ้ำกันในกรณี gen พร้อมกันหลายกลุ่ม
         filename = f"report_{int(time.time())}.png"
         path = os.path.join(self.output_path, filename)
         
         img.save(path)
-        img.close() 
+        img.close() # คืนทรัพยากร Memory
         return path
