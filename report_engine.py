@@ -35,7 +35,7 @@ class ReportEngine:
         # --- ส่วนหัว (Title) ---
         draw.rectangle([0, 0, width, head_h], fill=(255, 255, 0))
         # คำนวณให้ Title อยู่กึ่งกลางเสมอ
-        title_text = "没日报表"
+        title_text = "每日报表"
         t_w = draw.textlength(title_text, font=title_font)
         draw.text(((width - t_w) // 2, 25), title_text, fill=(255, 0, 0), font=title_font)
 
