@@ -20,7 +20,7 @@ class Database:
             print(f"❌ Database connection failed: {e}")
 
     def ensure_connection(self):
-        """ตรวจสอบว่าการเชื่อมต่อยังใช้งานได้ไหม ถ้าไม่ได้ให้ต่อใหม่"""
+        """ตรวจสอบความพร้อมของการเชื่อมต่อ"""
         try:
             if self.conn.closed:
                 self.connect()
@@ -28,15 +28,21 @@ class Database:
             self.connect()
 
     def _create_tables(self):
-        # ใช้ความสามารถของ PostgreSQL: สร้างตารางและ Index
+        """สร้างตารางที่จำเป็น (เพิ่มคอลัมน์ chat_id เพื่อแยกกลุ่ม)"""
         with self.conn.cursor() as cur:
+            # 1. ตารางสมาชิก (อิงตาม user_id เพราะสิทธิ์ติดตัวบุคคล)
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS subscriptions (
                     user_id BIGINT PRIMARY KEY,
                     expiry_date TIMESTAMP NOT NULL
                 );
+            """)
+            
+            # 2. ตารางบันทึกข้อมูล (เพิ่ม chat_id เพื่อแยกข้อมูลแต่ละกลุ่ม)
+            cur.execute("""
                 CREATE TABLE IF NOT EXISTS records (
                     id SERIAL PRIMARY KEY,
+                    chat_id BIGINT,
                     record_date VARCHAR(50),
                     t12_val NUMERIC(18,2) DEFAULT 0,
                     t23_val NUMERIC(18,2) DEFAULT 0,
@@ -49,9 +55,15 @@ class Database:
                     actual_u NUMERIC(18,2) DEFAULT 0,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
+                CREATE INDEX IF NOT EXISTS idx_records_chat ON records(chat_id);
+            """)
+
+            # 3. ตารางรอชำระเงิน (เพิ่ม chat_id เพื่อให้บอทแจ้งเตือนกลับถูกที่)
+            cur.execute("""
                 CREATE TABLE IF NOT EXISTS payments (
                     id SERIAL PRIMARY KEY,
                     user_id BIGINT NOT NULL,
+                    chat_id BIGINT,
                     amount NUMERIC(18,4) NOT NULL,
                     start_time INT NOT NULL,
                     status VARCHAR(20) DEFAULT 'pending',
@@ -61,6 +73,7 @@ class Database:
             """)
         self.conn.commit()
 
+    # --- ระบบสมาชิก ---
     def get_user_expiry(self, user_id):
         self.ensure_connection()
         try:
@@ -90,15 +103,16 @@ class Database:
             self.conn.rollback()
             return None
 
-    def save_record(self, data):
+    # --- ระบบบันทึกข้อมูล (แยกตาม chat_id) ---
+    def save_record(self, data, chat_id):
         self.ensure_connection()
         try:
             sql = """
-                INSERT INTO records (record_date, t12_val, t23_val, p_day, p_total, cust_count, jpy_amt, u_perf, fee_u, actual_u) 
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                INSERT INTO records (chat_id, record_date, t12_val, t23_val, p_day, p_total, cust_count, jpy_amt, u_perf, fee_u, actual_u) 
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """
             self.cursor.execute(sql, (
-                data.get('date'), data.get('t12'), data.get('t23'), 
+                chat_id, data.get('date'), data.get('t12'), data.get('t23'), 
                 data.get('p_day'), data.get('p_total'), data.get('cust'), 
                 data.get('jpy'), data.get('u_perf'), data.get('fee'), data.get('actual')
             ))
@@ -107,36 +121,48 @@ class Database:
             print(f"Error save_record: {e}")
             self.conn.rollback()
 
-    def get_all_records(self):
-        self.ensure_connection()
-        self.cursor.execute("SELECT * FROM records ORDER BY id ASC")
-        return self.cursor.fetchall()
-
-    def undo_last_record(self):
+    def get_records_by_chat(self, chat_id):
+        """ดึงข้อมูลเฉพาะของแชท/กลุ่มที่กำหนด"""
         self.ensure_connection()
         try:
-            self.cursor.execute("DELETE FROM records WHERE id = (SELECT MAX(id) FROM records)")
+            self.cursor.execute("SELECT * FROM records WHERE chat_id = %s ORDER BY id ASC", (chat_id,))
+            return self.cursor.fetchall()
+        except Exception as e:
+            print(f"Error get_records: {e}")
+            self.conn.rollback()
+            return []
+
+    def undo_last_record(self, chat_id):
+        """ลบรายการล่าสุดเฉพาะของกลุ่มนั้นๆ"""
+        self.ensure_connection()
+        try:
+            self.cursor.execute("""
+                DELETE FROM records 
+                WHERE id = (SELECT MAX(id) FROM records WHERE chat_id = %s)
+            """, (chat_id,))
             self.conn.commit()
         except Exception as e:
             print(f"Error undo: {e}")
             self.conn.rollback()
 
-    def reset_all_records(self):
+    def reset_all_records(self, chat_id):
+        """ล้างข้อมูลทั้งหมดเฉพาะของกลุ่มนั้นๆ"""
         self.ensure_connection()
         try:
-            self.cursor.execute("TRUNCATE TABLE records RESTART IDENTITY")
+            self.cursor.execute("DELETE FROM records WHERE chat_id = %s", (chat_id,))
             self.conn.commit()
         except Exception as e:
             print(f"Error reset: {e}")
             self.conn.rollback()
 
-    def save_payment_intent(self, user_id, amount, start_time):
+    # --- ระบบชำระเงิน ---
+    def save_payment_intent(self, user_id, chat_id, amount, start_time):
         self.ensure_connection()
         try:
             self.cursor.execute("""
-                INSERT INTO payments (user_id, amount, start_time, status) 
-                VALUES (%s, %s, %s, 'pending')
-            """, (user_id, amount, start_time))
+                INSERT INTO payments (user_id, chat_id, amount, start_time, status) 
+                VALUES (%s, %s, %s, %s, 'pending')
+            """, (user_id, chat_id, amount, start_time))
             self.conn.commit()
         except Exception as e:
             print(f"Error save_payment_intent: {e}")
@@ -144,8 +170,13 @@ class Database:
 
     def get_all_pending_payments(self):
         self.ensure_connection()
-        self.cursor.execute("SELECT * FROM payments WHERE status = 'pending'")
-        return self.cursor.fetchall()
+        try:
+            self.cursor.execute("SELECT * FROM payments WHERE status = 'pending'")
+            return self.cursor.fetchall()
+        except Exception as e:
+            print(f"Error get_pending: {e}")
+            self.conn.rollback()
+            return []
 
     def update_payment_status(self, pay_id, status, txid=None):
         self.ensure_connection()
