@@ -40,20 +40,17 @@ def check_tronscan(target_amount, start_time):
             if tx['tokenInfo']['tokenId'] == 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t': # USDT
                 amount_received = float(tx['quant']) / 1_000_000
                 tx_time = tx['block_ts'] / 1000 
-                
-                # เช็คยอดตรงกัน (ทศนิยม 3 ตำแหน่ง) และเวลาโอนต้องหลังจากสร้าง Order
                 if abs(amount_received - target_amount) < 0.0001 and tx_time >= start_time:
                     return True, tx['transaction_id']
     except Exception as e:
         print(f"⚠️ TronScan Error: {e}")
     return False, None
 
-# --- 2. ฟังก์ชัน JobQueue (รันอัตโนมัติทุก 60 วินาที) ---
+# --- 2. ฟังก์ชัน JobQueue (แจ้งเตือนกลับไปยัง Chat ID เดิม) ---
 async def auto_payment_monitor(context: ContextTypes.DEFAULT_TYPE):
     try:
         pending_list = db.get_all_pending_payments()
         for pay in pending_list:
-            # ถ้าเกิน 30 นาที ปรับเป็น expired
             if int(time.time()) - pay['start_time'] > 1800:
                 db.update_payment_status(pay['id'], 'expired')
                 continue
@@ -63,80 +60,82 @@ async def auto_payment_monitor(context: ContextTypes.DEFAULT_TYPE):
                 db.update_payment_status(pay['id'], 'success', txid)
                 new_exp = db.add_subscription(pay['user_id'], days=30)
                 
-                # แจ้งเตือนสมาชิก
+                # ส่งกลับไปยัง chat_id ที่บันทึกไว้ (รองรับทั้งกลุ่มและส่วนตัว)
+                target_id = pay.get('chat_id') or pay['user_id']
+                
                 await context.bot.send_message(
-                    chat_id=pay['user_id'],
+                    chat_id=target_id,
                     text=f"🎊 **自动充值成功！**\n\n✅ 收到: `{pay['amount']}` USDT\n📅 有效期至: `{new_exp.strftime('%Y-%m-%d %H:%M:%S')}`\n🚀 权限已开通！",
                     parse_mode='Markdown'
                 )
     except Exception as e:
         print(f"❌ Monitor Job Error: {e}")
 
-# --- 3. Middleware เช็คสิทธิ์สมาชิก ---
+# --- 3. Helper Functions ---
 async def is_subscribed(update: Update):
     user_id = update.effective_user.id
     expiry = db.get_user_expiry(user_id)
     if not expiry or expiry < datetime.now():
-        await update.message.reply_text("\n请使用 /renew 续费后使用 (150 USDT/30天)")
+        await update.message.reply_text("❌ **服务已到期**\n请使用 /renew 续费 (150 USDT/30天)")
         return False
     return True
 
-# --- 4. คำสั่งต่างๆ (Commands) ---
+async def send_report_action(update):
+    chat_id = update.effective_chat.id
+    records = db.get_records_by_chat(chat_id) # แยกตามกลุ่ม
+    
+    target = update.message or update.callback_query.message
+    if not records:
+        await target.reply_text("📭 暂无记录 (当前聊天)。")
+        return
+    
+    path = engine.create_report(records)
+    await target.reply_photo(photo=open(path, 'rb'), caption="📊 总结报表")
+    if os.path.exists(path): os.remove(path)
+
+# --- 4. คำสั่งหลัก (Commands) ---
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    welcome_text = (
-        "👋 **欢迎使用记账助手！**\n\n"
-        "可用指令:\n"
-        "/add - 登记新数据\n"
-        "/report - 查看报表图片\n"
-        "/renew - 续费会员 (150 USDT)\n"
-        "/undo - 撤销最后一笔\n"
-        "/reset - 清空所有数据"
-    )
-    await update.message.reply_text(welcome_text, parse_mode='Markdown')
+    await update.message.reply_text("👋 **欢迎使用记账助手！**\n\n/add - 登记\n/report - 报表\n/renew - 续费\n/undo - 撤销\n/reset - 清空", parse_mode='Markdown')
 
 async def renew_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
     final_amt = round(150.0 + random.uniform(0.001, 0.999), 3)
     start_ts = int(time.time())
-    db.save_payment_intent(user_id, final_amt, start_ts)
     
-    msg = (
-        f"💳 **会员续费 (30天)**\n\n"
-        f"💵 请转账: `{final_amt}` USDT\n"
-        f"📍 网络: **TRC20**\n"
-        f"🏦 地址: `{os.getenv('MY_WALLET')}`\n\n"
-        f"⚠️ 请确保金额**精确一致**，系统将自动激活。"
-    )
+    db.save_payment_intent(user_id, chat_id, final_amt, start_ts)
+    
+    msg = (f"💳 **会员续费 (30天)**\n\n💵 请转账: `{final_amt}` USDT\n📍 网络: **TRC20**\n🏦 地址: `{os.getenv('MY_WALLET')}`\n\n⚠️ 请确保金额精确，系统将自动激活。")
     await update.message.reply_text(msg, parse_mode='Markdown')
 
 async def undo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_subscribed(update): return
-    db.undo_last_record()
-    await update.message.reply_text("🗑 已成功撤销最后一条记录。")
+    db.undo_last_record(update.effective_chat.id)
+    await update.message.reply_text("🗑 已撤销当前聊天的最后一条记录。")
     await send_report_action(update)
 
 async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_subscribed(update): return
-    keyboard = [[
-        InlineKeyboardButton("✅ 确定清空", callback_data='confirm_reset'),
-        InlineKeyboardButton("❌ 取消", callback_data='cancel_reset')
-    ]]
-    await update.message.reply_text("⚠️ **警告**: 您确定要清空所有数据记录吗？", 
-                                  reply_markup=InlineKeyboardMarkup(keyboard))
+    keyboard = [[InlineKeyboardButton("✅ 确定清空", callback_data='confirm_reset'), InlineKeyboardButton("❌ 取消", callback_data='cancel_reset')]]
+    await update.message.reply_text("⚠️ **警告**: 确定要清空 **当前聊天** 的所有数据吗？", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     if query.data == 'confirm_reset':
-        db.reset_all_records()
+        db.reset_all_records(query.message.chat_id)
         await query.message.edit_text("💥 数据已全部清空。")
     else:
         await query.message.edit_text("🚫 操作已取消。")
 
-# --- 5. กระบวนการ /add (Conversation) ---
+async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await is_subscribed(update): return
+    await send_report_action(update)
+
+# --- 5. กระบวนการ /add (รองรับ Re-entry & Isolation) ---
 async def start_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_subscribed(update): return ConversationHandler.END
-    await update.message.reply_text("🧧 **开始登记**\n请直接回复 **日期** (例如: 4.12):")
+    await update.message.reply_text("🧧 **开始登记**\n请回复 **日期** (例如: 4.12):")
     return DATE
 
 async def get_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -185,41 +184,28 @@ async def get_fee(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ACTUAL
 
 async def get_actual(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data['actual'] = float(update.message.text)
-    db.save_record(context.user_data)
-    await update.message.reply_text("✅ 登记成功！")
-    await send_report_action(update)
+    try:
+        context.user_data['actual'] = float(update.message.text)
+        db.save_record(context.user_data, update.effective_chat.id) # บันทึกแยก chat_id
+        await update.message.reply_text("✅ 登记成功！")
+        await send_report_action(update)
+    except Exception as e:
+        await update.message.reply_text(f"❌ 错误: {e}")
     return ConversationHandler.END
 
-# --- 6. การสร้างและส่งรายงาน ---
-async def send_report_action(update):
-    records = db.get_all_records()
-    if not records:
-        target = update.message or update.callback_query.message
-        await target.reply_text("📭 暂无记录。")
-        return
-    path = engine.create_report(records)
-    target = update.message or update.callback_query.message
-    await target.reply_photo(photo=open(path, 'rb'), caption="📊 总结报表")
-    if os.path.exists(path): os.remove(path)
-
-async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await is_subscribed(update): return
-    await send_report_action(update)
+# --- 6. จบการทำงาน (Exit Conversation) ---
+async def stop_nested(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    return ConversationHandler.END
 
 # --- 7. Main Entry Point ---
 if __name__ == '__main__':
-    # สร้าง Application
     app = ApplicationBuilder().token(os.getenv('BOT_TOKEN')).build()
     
-    # เริ่มต้น JobQueue (ต้องติดตั้ง python-telegram-bot[job-queue])
     if app.job_queue:
         app.job_queue.run_repeating(auto_payment_monitor, interval=60, first=10)
         print("✅ JobQueue is active")
-    else:
-        print("❌ JobQueue failed to start (Check requirements.txt)")
 
-    # เพิ่ม Conversation Handler
+    # ตั้งค่า Handlers ที่ข้ามไปมาได้ (allow_reentry=True)
     add_conv = ConversationHandler(
         entry_points=[CommandHandler('add', start_add)],
         states={
@@ -234,15 +220,17 @@ if __name__ == '__main__':
             FEE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_fee)],
             ACTUAL: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_actual)],
         },
-        fallbacks=[CommandHandler('cancel', lambda u,c: ConversationHandler.END)]
+        fallbacks=[CommandHandler('cancel', lambda u,c: ConversationHandler.END)],
+        allow_reentry=True # กด /add ซ้ำเพื่อเริ่มใหม่ได้ทันที
     )
     
-    app.add_handler(add_conv)
-    app.add_handler(CommandHandler('start', start_command))
-    app.add_handler(CommandHandler('renew', renew_command))
+    # จัดลำดับ Handler: คำสั่งทั่วไปต้องอยู่ก่อน Conversation ถ้าจะให้มันข้ามได้
     app.add_handler(CommandHandler('report', report_command))
+    app.add_handler(CommandHandler('renew', renew_command))
     app.add_handler(CommandHandler('undo', undo_command))
     app.add_handler(CommandHandler('reset', reset_command))
+    app.add_handler(add_conv)
+    app.add_handler(CommandHandler('start', start_command))
     app.add_handler(CallbackQueryHandler(callback_handler))
     
     print("🚀 Bot is running...")
