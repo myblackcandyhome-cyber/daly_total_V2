@@ -28,21 +28,17 @@ class Database:
             self.connect()
 
     def _create_tables(self):
-        """สร้างตารางที่จำเป็น (เพิ่มคอลัมน์ chat_id เพื่อแยกกลุ่ม)"""
+        """สร้างตารางและอัปเดตโครงสร้างตารางอัตโนมัติ (Auto-Migration)"""
         with self.conn.cursor() as cur:
-            # 1. ตารางสมาชิก (อิงตาม user_id เพราะสิทธิ์ติดตัวบุคคล)
+           
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS subscriptions (
                     user_id BIGINT PRIMARY KEY,
                     expiry_date TIMESTAMP NOT NULL
                 );
-            """)
-            
-            # 2. ตารางบันทึกข้อมูล (เพิ่ม chat_id เพื่อแยกข้อมูลแต่ละกลุ่ม)
-            cur.execute("""
+                
                 CREATE TABLE IF NOT EXISTS records (
                     id SERIAL PRIMARY KEY,
-                    chat_id BIGINT,
                     record_date VARCHAR(50),
                     t12_val NUMERIC(18,2) DEFAULT 0,
                     t23_val NUMERIC(18,2) DEFAULT 0,
@@ -55,15 +51,10 @@ class Database:
                     actual_u NUMERIC(18,2) DEFAULT 0,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
-                CREATE INDEX IF NOT EXISTS idx_records_chat ON records(chat_id);
-            """)
 
-            # 3. ตารางรอชำระเงิน (เพิ่ม chat_id เพื่อให้บอทแจ้งเตือนกลับถูกที่)
-            cur.execute("""
                 CREATE TABLE IF NOT EXISTS payments (
                     id SERIAL PRIMARY KEY,
                     user_id BIGINT NOT NULL,
-                    chat_id BIGINT,
                     amount NUMERIC(18,4) NOT NULL,
                     start_time INT NOT NULL,
                     status VARCHAR(20) DEFAULT 'pending',
@@ -71,6 +62,31 @@ class Database:
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
             """)
+
+           
+            cur.execute("""
+                DO $$ 
+                BEGIN 
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
+                                   WHERE table_name='records' AND column_name='chat_id') THEN
+                        ALTER TABLE records ADD COLUMN chat_id BIGINT;
+                        CREATE INDEX idx_records_chat ON records(chat_id);
+                    END IF;
+                END $$;
+            """)
+
+          
+            cur.execute("""
+                DO $$ 
+                BEGIN 
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
+                                   WHERE table_name='payments' AND column_name='chat_id') THEN
+                        ALTER TABLE payments ADD COLUMN chat_id BIGINT;
+                    END IF;
+                END $$;
+            """)
+
+            
         self.conn.commit()
 
     # --- ระบบสมาชิก ---
